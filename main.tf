@@ -2,6 +2,9 @@ provider "aws" {
   region = "eu-west-2"
 }
 
+# -------------------------
+# VPC
+# -------------------------
 resource "aws_vpc" "devopsshack_vpc" {
   cidr_block = "10.0.0.0/16"
 
@@ -12,6 +15,7 @@ resource "aws_vpc" "devopsshack_vpc" {
 
 resource "aws_subnet" "devopsshack_subnet" {
   count = 2
+
   vpc_id                  = aws_vpc.devopsshack_vpc.id
   cidr_block              = cidrsubnet(aws_vpc.devopsshack_vpc.cidr_block, 8, count.index)
   availability_zone       = element(["eu-west-2a", "eu-west-2b"], count.index)
@@ -44,11 +48,15 @@ resource "aws_route_table" "devopsshack_route_table" {
 }
 
 resource "aws_route_table_association" "devopsshack_association" {
-  count          = 2
+  count = 2
+
   subnet_id      = aws_subnet.devopsshack_subnet[count.index].id
   route_table_id = aws_route_table.devopsshack_route_table.id
 }
 
+# -------------------------
+# Security Groups
+# -------------------------
 resource "aws_security_group" "devopsshack_cluster_sg" {
   vpc_id = aws_vpc.devopsshack_vpc.id
 
@@ -57,10 +65,6 @@ resource "aws_security_group" "devopsshack_cluster_sg" {
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = {
-    Name = "devopsshack-cluster-sg"
   }
 }
 
@@ -80,12 +84,64 @@ resource "aws_security_group" "devopsshack_node_sg" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
-
-  tags = {
-    Name = "devopsshack-node-sg"
-  }
 }
 
+# -------------------------
+# IAM ROLES
+# -------------------------
+resource "aws_iam_role" "devopsshack_cluster_role" {
+  name = "devopsshack-cluster-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Service = "eks.amazonaws.com"
+      }
+      Action = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "devopsshack_cluster_role_policy" {
+  role       = aws_iam_role.devopsshack_cluster_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+}
+
+resource "aws_iam_role" "devopsshack_node_group_role" {
+  name = "devopsshack-node-group-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Service = "ec2.amazonaws.com"
+      }
+      Action = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "devopsshack_node_group_role_policy" {
+  role       = aws_iam_role.devopsshack_node_group_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+}
+
+resource "aws_iam_role_policy_attachment" "devopsshack_node_group_cni_policy" {
+  role       = aws_iam_role.devopsshack_node_group_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+}
+
+resource "aws_iam_role_policy_attachment" "devopsshack_node_group_registry_policy" {
+  role       = aws_iam_role.devopsshack_node_group_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+}
+
+# -------------------------
+# EKS CLUSTER
+# -------------------------
 resource "aws_eks_cluster" "devopsshack" {
   name     = "devopsshack-cluster"
   role_arn = aws_iam_role.devopsshack_cluster_role.arn
@@ -94,18 +150,15 @@ resource "aws_eks_cluster" "devopsshack" {
     subnet_ids         = aws_subnet.devopsshack_subnet[*].id
     security_group_ids = [aws_security_group.devopsshack_cluster_sg.id]
   }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.devopsshack_cluster_role_policy
+  ]
 }
 
-
-resource "aws_eks_addon" "ebs_csi_driver" {
-  cluster_name    = aws_eks_cluster.devopsshack.name
-  addon_name      = "aws-ebs-csi-driver"
-  
-  resolve_conflicts_on_create = "OVERWRITE"
-  resolve_conflicts_on_update = "OVERWRITE"
-}
-
-
+# -------------------------
+# NODE GROUP
+# -------------------------
 resource "aws_eks_node_group" "devopsshack" {
   cluster_name    = aws_eks_cluster.devopsshack.name
   node_group_name = "devopsshack-node-group"
@@ -124,67 +177,68 @@ resource "aws_eks_node_group" "devopsshack" {
     ec2_ssh_key = var.ssh_key_name
     source_security_group_ids = [aws_security_group.devopsshack_node_sg.id]
   }
-}
 
-resource "aws_iam_role" "devopsshack_cluster_role" {
-  name = "devopsshack-cluster-role"
-
-  assume_role_policy = <<EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "Service": "eks.amazonaws.com"
-      },
-      "Action": "sts:AssumeRole"
-    }
+  depends_on = [
+    aws_iam_role_policy_attachment.devopsshack_node_group_role_policy,
+    aws_iam_role_policy_attachment.devopsshack_node_group_cni_policy,
+    aws_iam_role_policy_attachment.devopsshack_node_group_registry_policy
   ]
 }
-EOF
+
+# -------------------------
+# OIDC (CRITICAL FIX)
+# -------------------------
+data "tls_certificate" "oidc" {
+  url = aws_eks_cluster.devopsshack.identity[0].oidc[0].issuer
 }
 
-resource "aws_iam_role_policy_attachment" "devopsshack_cluster_role_policy" {
-  role       = aws_iam_role.devopsshack_cluster_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+resource "aws_iam_openid_connect_provider" "oidc" {
+  url = aws_eks_cluster.devopsshack.identity[0].oidc[0].issuer
+
+  client_id_list  = ["sts.amazonaws.com"]
+  thumbprint_list = [data.tls_certificate.oidc.certificates[0].sha1_fingerprint]
 }
 
-resource "aws_iam_role" "devopsshack_node_group_role" {
-  name = "devopsshack-node-group-role"
+# -------------------------
+# EBS CSI IRSA ROLE (CRITICAL FIX)
+# -------------------------
+resource "aws_iam_role" "ebs_csi_role" {
+  name = "AmazonEKS_EBS_CSI_DriverRole"
 
-  assume_role_policy = <<EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "Service": "ec2.amazonaws.com"
-      },
-      "Action": "sts:AssumeRole"
-    }
-  ]
-}
-EOF
-}
-
-resource "aws_iam_role_policy_attachment" "devopsshack_node_group_role_policy" {
-  role       = aws_iam_role.devopsshack_node_group_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
-}
-
-resource "aws_iam_role_policy_attachment" "devopsshack_node_group_cni_policy" {
-  role       = aws_iam_role.devopsshack_node_group_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Federated = aws_iam_openid_connect_provider.oidc.arn
+      }
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "${replace(aws_iam_openid_connect_provider.oidc.url, "https://", "")}:sub" = "system:serviceaccount:kube-system:ebs-csi-controller-sa"
+        }
+      }
+    }]
+  })
 }
 
-resource "aws_iam_role_policy_attachment" "devopsshack_node_group_registry_policy" {
-  role       = aws_iam_role.devopsshack_node_group_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
-}
-
-resource "aws_iam_role_policy_attachment" "devopsshack_node_group_ebs_policy" {
-  role       = aws_iam_role.devopsshack_node_group_role.name
+resource "aws_iam_role_policy_attachment" "ebs_policy" {
+  role       = aws_iam_role.ebs_csi_role.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
+}
+
+# -------------------------
+# EBS CSI ADDON (FIXED)
+# -------------------------
+resource "aws_eks_addon" "ebs_csi_driver" {
+  cluster_name             = aws_eks_cluster.devopsshack.name
+  addon_name               = "aws-ebs-csi-driver"
+  service_account_role_arn = aws_iam_role.ebs_csi_role.arn
+
+  resolve_conflicts_on_create = "OVERWRITE"
+  resolve_conflicts_on_update = "OVERWRITE"
+
+  depends_on = [
+    aws_eks_node_group.devopsshack
+  ]
 }
