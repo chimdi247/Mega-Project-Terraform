@@ -161,7 +161,8 @@ subjects:
    kubectl auth can-i create persistentvolumes --as=system:serviceaccount:webapps:jenkins
    ```
 
-4.   ```bash
+4. Get secret token for SA
+   ```bash
     kubectl get secret <secret-name> -n webapps -o jsonpath='{.data.token}' | base64 -d
    ```
 
