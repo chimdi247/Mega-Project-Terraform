@@ -24,6 +24,7 @@ rules:
   - apiGroups: [""]
     resources:
       - secrets
+      - serviceaccounts
       - configmaps
       - persistentvolumeclaims
       - services
