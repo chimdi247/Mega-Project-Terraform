@@ -24,6 +24,7 @@ rules:
   - apiGroups: [""]
     resources:
       - secrets
+      - serviceaccounts
       - configmaps
       - persistentvolumeclaims
       - services
@@ -160,6 +161,13 @@ subjects:
    kubectl auth can-i create storageclasses --as=system:serviceaccount:webapps:jenkins
    kubectl auth can-i create persistentvolumes --as=system:serviceaccount:webapps:jenkins
    ```
+
+4. Get secret token for SA
+   ```bash
+    kubectl get secret <secret-name> -n webapps -o jsonpath='{.data.token}' | base64 -d
+   ```
+
+   
 
 ### Generate token using service account in the namespace
 [Create Token](https://kubernetes.io/docs/reference/access-authn-authz/service-accounts-admin/#:~:text=To%20create%20a%20non%2Dexpiring,with%20that%20generated%20token%20data.)
